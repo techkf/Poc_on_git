@@ -1,0 +1,470 @@
+/*!
+ * @license
+ * Copyright 2019 Alfresco Software, Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import {
+  ContentService,
+  EXTENDIBLE_COMPONENT,
+  FileUtils,
+  LogService,
+  NodeAllowableOperationSubject,
+  TranslationService,
+  UploadService,
+  AllowableOperationsEnum,
+  AlfrescoApiService,
+  NodesApiService
+} from '@alfresco/adf-core';
+import {
+  Component,
+  EventEmitter,
+  forwardRef,
+  Input,
+  OnChanges,
+  OnInit,
+  Output,
+  SimpleChanges,
+  ViewEncapsulation,
+  NgZone,
+  ViewChild,
+  TemplateRef
+} from '@angular/core';
+import { Node } from '@alfresco/js-api';
+import { Subject,forkJoin } from 'rxjs';
+import $ from 'jquery';
+import { UploadBase } from './upload-base';
+import { DomSanitizer } from '@angular/platform-browser';
+import { PermissionModel } from '@alfresco/adf-content-services';
+import { MatIconRegistry } from '@angular/material/icon';
+import { MatDialog } from '@angular/material/dialog';
+import { FormBuilder, FormControl, FormGroup, Validators } from '@angular/forms';
+import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { ToastrNotificationService } from '../../../../../../services/toastr-notification.service';
+
+@Component({
+  selector: 'app-upload-button',
+  templateUrl: './upload-button.component-dw.html',
+  styleUrls: ['./upload-button.component-dw.scss'],
+  viewProviders: [
+    {
+      provide: EXTENDIBLE_COMPONENT,
+      useExisting: forwardRef(() => UploadButtonDWComponent)
+    }
+  ],
+  encapsulation: ViewEncapsulation.None
+})
+export class UploadButtonDWComponent extends UploadBase
+  implements OnInit, OnChanges, NodeAllowableOperationSubject {
+    isDisplayNone: string = 'none';
+    @ViewChild('uploadFileTemplate')
+    uploadFileTemplate: TemplateRef<any>;
+    @ViewChild('uploadfolderTemplate')
+    uploadfolderTemplate: TemplateRef<any>;
+    shareBaseURI: string = '/share/service';
+  selectFormProperties = [];
+  propertiesFormGroup: FormGroup;
+  isTypeSelected = false;
+  modelData: any;
+  blankDocNodeType: any;
+  nodeModelType: any;
+  seletedFiles=[];
+  clickedItem:any;
+  documentsListMove: any= {
+    list: {
+      entries: []
+    }
+  };
+  isChecked:boolean=false;
+
+  @Output()
+  success = new EventEmitter();
+  /** Allows/disallows upload folders (only for Chrome). */
+  @Input()
+  uploadFolders: Boolean = false;
+
+  @Input()
+  rootFolderId: '-root-';
+
+  /** Allows/disallows multiple files */
+  @Input()
+  multipleFiles: Boolean = false;
+
+  /** Defines the text of the upload button. */
+  @Input()
+  staticTitle: string;
+
+  /** Custom tooltip text. */
+  @Input()
+  tooltip: string = null;
+
+  /** Emitted when create permission is missing. */
+  @Output()
+  permissionEvent: EventEmitter<PermissionModel> = new EventEmitter<
+    PermissionModel
+  >();
+
+  private hasAllowableOperations: Boolean = false;
+
+  protected permissionValue: Subject<boolean> = new Subject<boolean>();
+
+  constructor(
+    public toastrNotification: ToastrNotificationService,
+    private nodesApiservice: NodesApiService,
+    public alfrescoApiService: AlfrescoApiService,
+    public dialog: MatDialog,
+    private httpClient: HttpClient,
+    private _formBuilder: FormBuilder,
+    protected uploadService: UploadService,
+    private contentService: ContentService,
+    protected translationService: TranslationService,
+    protected logService: LogService,
+    protected ngZone: NgZone,
+    public matIconRegistry: MatIconRegistry,
+    public domSanitizer: DomSanitizer
+  ) {
+    super(uploadService, translationService, ngZone);
+  }
+
+  ngOnInit() {
+    this.propertiesFormGroup = this._formBuilder.group({});
+    this.getCustomModel();
+    this.permissionValue.subscribe((permission: boolean) => {
+      this.hasAllowableOperations = permission;
+    });
+    this.matIconRegistry.addSvgIcon(
+      'uploadFolder',
+      this.domSanitizer.bypassSecurityTrustResourceUrl(
+        './assets/images/upload-folder.svg'
+      )
+    );
+    this.matIconRegistry.addSvgIcon(
+      'uploadFile',
+      this.domSanitizer.bypassSecurityTrustResourceUrl(
+        './assets/images/uploading-file.svg'
+      )
+    );
+  }
+
+  ngOnChanges(changes: SimpleChanges) {
+    const rootFolderId = changes['rootFolderId'];
+    if (rootFolderId && rootFolderId.currentValue) {
+      this.checkPermission();
+    }
+  }
+
+  isButtonDisabled(): boolean {
+    return this.disabled ? true : undefined;
+  }
+
+  onFilesAdded($event: any): void {
+    const Files = FileUtils.toFileArray($event.currentTarget.files);
+    this.documentsListMove.list.entries=Files;
+    console.log("event--",$event,"files----->",Files);
+    
+    if (this.hasAllowableOperations) {
+      this.dialog.open(this.uploadFileTemplate, {
+        width: '1000px',
+        height: '600px',
+        panelClass: 'digi-upload-doucment',        
+        disableClose: false
+      });
+      this.seletedFiles=[];
+      this.clickedItem=null;
+      // this.propertiesFormGroup.reset();
+      this.nodeModelType = {};
+      this.isTypeSelected=false;
+  
+      
+      //this.uploadFiles(files);
+    } else {
+      this.permissionEvent.emit(
+        new PermissionModel({
+          type: 'content',
+          action: 'upload',
+          permission: 'create'
+        })
+      );
+    }
+    // reset the value of the input file
+    $event.target.value = '';
+  }
+
+  onDirectoryAdded($event: any): void {
+    if (this.hasAllowableOperations) {
+      const files: File[] = FileUtils.toFileArray($event.currentTarget.files);
+      this.documentsListMove.list.entries=files;
+      this.dialog.open(this.uploadfolderTemplate, {
+        width: '1000px',
+        height: '600px',
+        panelClass: 'digi-upload-doucment',        
+        disableClose: false
+      });
+      this.seletedFiles=[];
+      this.clickedItem=null;
+      // this.propertiesFormGroup.reset();
+      this.nodeModelType = {};
+      this.isTypeSelected=false;
+     // this.uploadFiles(files);
+    } else {
+      this.permissionEvent.emit(
+        new PermissionModel({
+          type: 'content',
+          action: 'upload',
+          permission: 'create'
+        })
+      );
+    }
+    // reset the value of the input file
+    $event.target.value = '';
+  }
+
+  checkPermission() {
+    if (this.rootFolderId) {
+      const opts: any = {
+        includeSource: true,
+        include: ['allowableOperations']
+      };
+
+      this.contentService.getNode(this.rootFolderId, opts).subscribe(
+        res =>
+          this.permissionValue.next(
+            this.nodeHasPermission(res.entry, AllowableOperationsEnum.CREATE)
+          ),
+        error => this.error.emit(error)
+      );
+    }
+  }
+
+  nodeHasPermission(
+    node: Node,
+    permission: AllowableOperationsEnum | string
+  ): boolean {
+    return this.contentService.hasAllowableOperations(node, permission);
+  }
+  uploadFolder() {
+    document.getElementById('uploadFolder').click();
+  }
+  uploadFile() {
+    document.getElementById('upload-single-file-label').click();
+  }
+  uploadMultiFile() {
+    document.getElementById('upload-multiple-files').click();
+  }
+  getTypeProperties(selectedTypeValue: any) {
+    this.blankDocNodeType = selectedTypeValue.value.name;
+    var headerArgs = new HttpHeaders({
+      Authorization: 'Basic ' + btoa(localStorage.getItem('ticket-ECM')),
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    });
+    var node = this.blankDocNodeType.split(':');
+    this.httpClient
+      .get(`${this.shareBaseURI}/cmm/model-service/${selectedTypeValue.value.modelName}/${[node[1]]}`, { headers: headerArgs })
+      .subscribe(
+        (modelproperties: any) => {
+          this.arrangePropertiesOrder(modelproperties, selectedTypeValue);
+        },
+        (error) => {
+          console.log(error);
+          let modelproperties: any = {};
+          modelproperties.form = [];
+          this.arrangePropertiesOrder(modelproperties, selectedTypeValue);
+        }
+      );
+  }
+  arrangePropertiesOrder(modelproperties, selectedTypeValue) {
+    let customControlForm = {};
+    var order = 1;
+    if (modelproperties.form.length > 0 && modelproperties.form[0].column != undefined) {
+      modelproperties.form[0].column.forEach((element) => {
+        this.selectFormProperties = selectedTypeValue.value.properties.map((property) => {
+          if (property.name == element.id) property.order = order;
+          return property;
+        });
+        order++;
+      });
+      this.selectFormProperties = this.selectFormProperties.sort((propertyA, propertyB) => {
+        return propertyA.order - propertyB.order;
+      });
+    } else {
+      this.selectFormProperties = selectedTypeValue.value.properties;
+    }
+    for (const property of this.selectFormProperties) {
+      property.dataType = this.generateDataType(property.dataType);
+      let validators = [];
+      let defaultValue = '';
+      if (property.defaultValue) defaultValue = property.defaultValue;
+      if (property.Constraints && property.Constraints.minValue) validators.push(Validators.min(property.Constraints.minValue));
+      if (property.Constraints && property.Constraints.maxValue) validators.push(Validators.max(property.Constraints.maxValue));
+      if (property.Constraints && property.Constraints.minLength) validators.push(Validators.minLength(property.Constraints.minLength));
+      if (property.Constraints && property.Constraints.maxLength) validators.push(Validators.maxLength(property.Constraints.maxLength));
+      if (property.Constraints && property.Constraints.expression) validators.push(Validators.pattern(property.Constraints.expression));
+      if (property.Constraints && property.Constraints.allowedValues && property.Constraints.allowedValues.length > 0 && defaultValue == '')
+        defaultValue = property.Constraints.allowedValues[0];
+      customControlForm[property.name] = new FormControl(defaultValue, validators);
+    }
+    this.propertiesFormGroup = this._formBuilder.group(customControlForm);
+    this.isTypeSelected = true;
+  }
+  generateDataType(dataType) {
+    var type = dataType != undefined && dataType != null ? (dataType.includes(':') ? dataType.split(':')[1] : dataType) : 'text';
+    if (type == 'int' || type == 'number' || type == 'float') type = 'number';
+    return type;
+  }
+  getCustomModel() {
+    this.alfrescoApiService
+      .getInstance()
+      .ecmClient.callApi('/s/webscripts/customModelService', 'POST', {}, {}, {}, {}, {}, ['application/json'], ['application/json'], null, 'alfresco')
+      .then((customModelInfo) => {
+        if (customModelInfo) customModelInfo = JSON.parse(customModelInfo);
+        this.modelData = [];
+        customModelInfo.forEach((element) => {
+          for (let key in element) {
+            for (let i = 0; i < element[key].length; i++) {
+              element[key][i].modelName = key;
+              if (!element[key][i].title || element[key][i].title == '') element[key][i].title = 'Default title ' + i;
+              this.modelData.push(element[key][i]);
+            }
+          }
+        });
+      });
+  }
+  selectFile(data:any,evt){
+if(evt.checked==true){
+  if(this.seletedFiles.findIndex((e) => e.name === data.name) === -1)
+  this.seletedFiles.push(data);
+  $("evt.source.id").removeClass('mat-checkbox-checked');  
+}
+else
+{
+  this.seletedFiles=this.seletedFiles.filter((value)=>{
+    return value.name !==data.name;
+    })    
+}
+if(this.seletedFiles.length !== this.documentsListMove.list.entries.length){
+  $(".document-list-container-header mat-checkbox").removeClass('mat-checkbox-checked');
+}
+else{
+  $(".document-list-container-header mat-checkbox").addClass('mat-checkbox-checked');
+}
+  }
+ 
+  selectAllFiles(evt){    
+    if(evt.checked == true){
+      $(".digi-upload-card mat-checkbox").addClass('mat-checkbox-checked');
+      this.seletedFiles= this.documentsListMove.list.entries;
+    }
+    else{
+      $(".digi-upload-card mat-checkbox").removeClass('mat-checkbox-checked');
+      this.seletedFiles=[];
+    }
+  }
+  uploadFilesData(){
+    let updateDocumentProperties = Object.assign({}, this.propertiesFormGroup.value);
+   
+    return forkJoin(
+      this.seletedFiles.map((document) =>{
+        const documentProperties = {
+          aspectNames: ['cm:versionable'],
+          name:document.name,
+          nodeType: this.nodeModelType.name,
+          properties: Object.assign({}, updateDocumentProperties)
+        };
+        this.nodesApiservice.createNode(this.rootFolderId, documentProperties).subscribe((res:any)=>{
+          this.translationService.get('APP.UPLOAD_FILES_DW.MESSAGES.PROPERTY-UPDATED').subscribe((translate) => {
+            this.toastrNotification.showSuccess(res.name + translate, 'Success');
+          });
+          this.success.emit();
+          this.dialog.closeAll();
+        },
+        (error)=>
+        {
+          if (error.status == 409 || error.status == 400) {
+            this.toastrNotification.showError(JSON.parse(error.message).error.errorKey, 'Error');
+          }
+          else if (error.status == 403) {
+            this.translationService.get('APP.UPLOAD_FILES_DW.MESSAGES.NOT-AUTHORIZED-UPDATE-DOCUMENT').subscribe((translate) => {
+              this.toastrNotification.showError(translate, 'Error');
+            });
+            return;
+          }else{
+            this.translationService.get('APP.UPLOAD_FILES_DW.MESSAGES.ERROR-OCCURED-WHILE-UPDATING').subscribe((translate) => {
+            this.toastrNotification.showError(translate, 'Error');
+          });
+          }          
+          this.dialog.closeAll();
+        })       
+      })
+      )
+  }
+  uploadFolderData(){
+    const folderProperties = {
+      name:"test_jha1",
+      title:'New Upload Folder',
+      description:"new folder uploaded with few files"
+    };
+    this.nodesApiservice.createFolder(this.rootFolderId,folderProperties).subscribe((res:any)=>{
+      console.log("this.Upload--->",res);
+      let updateDocumentProperties = Object.assign({}, this.propertiesFormGroup.value);
+   
+      return forkJoin(
+        this.seletedFiles.map((document) =>{
+          const documentProperties = {
+            aspectNames: ['cm:versionable'],
+            name:document.name,
+            nodeType: this.nodeModelType.name,
+            properties: Object.assign({}, updateDocumentProperties)
+          };
+          console.log(documentProperties);
+          
+          
+         
+          this.nodesApiservice.createNode(res.id, documentProperties).subscribe((res:any)=>{
+            this.translationService.get('APP.UPLOAD_FILES_DW.MESSAGES.PROPERTY-UPDATED').subscribe((translate) => {
+              this.toastrNotification.showSuccess(res.name + translate, 'Success');
+            });
+            this.success.emit();
+            this.dialog.closeAll();
+          },
+          (error)=>
+          {
+            if (error.status == 409 || error.status == 400) {
+              this.toastrNotification.showError(JSON.parse(error.message).error.errorKey, 'Error');
+            }
+            else if (error.status == 403) {
+              this.translationService.get('APP.UPLOAD_FILES_DW.MESSAGES.NOT-AUTHORIZED-UPDATE-DOCUMENT').subscribe((translate) => {
+                this.toastrNotification.showError(translate, 'Error');
+              });
+              return;
+            }else{
+              this.translationService.get('APP.UPLOAD_FILES_DW.MESSAGES.ERROR-OCCURED-WHILE-UPDATING').subscribe((translate) => {
+              this.toastrNotification.showError(translate, 'Error');
+            });
+            }          
+            this.dialog.closeAll();
+          })       
+        })
+        )
+      // ----------------------------------------------------
+      
+    },(error)=>
+    {
+      if (error.status == 409 || error.status == 400) {
+        this.toastrNotification.showError(JSON.parse(error.message).error.errorKey, 'Error');
+      }}
+    )
+   
+  }
+}
